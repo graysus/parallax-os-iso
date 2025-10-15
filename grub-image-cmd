@@ -1,0 +1,19 @@
+mkgrub() {
+	mkdir --parents grub/x86_64-efi && \
+	cp /usr/lib64/grub/x86_64-efi/*.mod grub/x86_64-efi || \
+		return
+
+	grub-mkimage -o efi/boot/bootx64.efi --config=../../grub-load-boot.cfg -p '' -O x86_64-efi \
+		configfile ext2 fat part_gpt normal \
+		linux ls boot echo reboot search search_fs_file \
+		search_fs_uuid search_label help font efi_gop efi_uga gfxterm \
+		udf iso9660 regexp probe test || \
+			return
+
+	dd if=/dev/zero of="pxosboot.img" bs=512 count=2880 && \
+	mkfs.vfat -F12 -n "PXOSBOOT" "pxosboot.img" && \
+	mmd -i "pxosboot.img" ::efi && \
+	mmd -i "pxosboot.img" ::efi/boot && \
+	mcopy -i "pxosboot.img" efi/boot/bootx64.efi ::efi/boot/bootx64.efi || \
+		return
+}

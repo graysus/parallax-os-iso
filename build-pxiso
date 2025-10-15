@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+
+errout() {
+	echo "Error! $@" >&2
+	cleanmounts
+	IFM="$DATADIR/buildfiles/isofiles"
+	if mountpoint "$IFM" &>/dev/null; then
+		umount "$IFM"
+	fi
+	exit 1
+}
+cleanmounts() {
+	for i in proc sys dev tmp run etc var root home; do
+		if mountpoint "$i" &>/dev/null; then
+			umount "$i" || echo "Failed to unmount" >&2
+		fi
+	done
+}
+
+cd "$(dirname $0)"
+
+DATADIR="$(realpath .)"
+SOURCE="$(realpath install.img)"
+
+[ -f pxos.iso ] && rm pxos.iso
+[ -f pxos.img ] && rm pxos.img
+
+if [ -d buildfiles -o -s buildfiles ]; then
+	rm -rf buildfiles/*
+elif [ -e buildfiles ]; then
+	errout "buildfiles exists and is not a directory"
+else
+	mkdir buildfiles
+fi
+
+mkdir buildfiles/{rootfs,isofiles} && \
+cd buildfiles/rootfs || \
+	errout "Failed to make directories"
+
+tar xpf "$SOURCE" --xattrs-include="*" || errout "Failed to extract files"
+mv etc.def data/etc && \
+mv var.def data/var && \
+mkdir data/root data/home --parents && \
+mv boot.def boot    || \
+	errout "Failed to move files"
+
+for i in proc sys dev tmp run; do
+	mkdir --parents "$i"     || errout "Failed to make dir"
+	mount --bind "/$i" "$i"  || errout "Failed to mount"
+done
+
+mkdir --parents etc var root home || \
+	errout "Failed to make dirs"
+
+mount --bind data/etc  ./etc   && \
+mount --bind data/var  ./var   && \
+mount --bind data/home ./home  && \
+mount --bind data/root ./root  || \
+	errout "Failed to mount files"
+
+cp "$DATADIR/files/pxos-hook" "lib/initcpio/hooks/pxos" && \
+cp "$DATADIR/files/pxos-hook-install" "lib/initcpio/install/pxos" || \
+	errout "Failed to make initcpio hook"
+
+cp "$DATADIR/files/pxos-install" "bin/pxos-install" && \
+cp "$DATADIR/files/pxos.gpg" "etc/pxos.gpg" || \
+	errout "Failed to copy installer files!"
+
+mkdir --parents "etc/xdg/autostart" && \
+ln -s ../../../usr/share/applications/calamares.desktop etc/xdg/autostart/calamares.desktop || \
+	errout "Failed to configure calamares for autostart"
+
+# we don't know the user's time zone, set a default so the DE doesn't complain
+ln -sf ../usr/share/zoneinfo/America/New_York etc/localtime
+
+chroot . mkinitcpio -P || \
+	errout "Failed to make initcpio"
+
+chroot . useradd -mG wheel live && \
+chroot . passwd -d live && \
+chroot . passwd -d root || \
+	errout "Failed to make user accounts"
+
+cleanmounts
+
+dd if=/dev/zero of="$DATADIR/pxos.img" bs=16M count=$((64 * 7)) && \
+mkfs.vfat -F32 "$DATADIR/pxos.img" && \
+mount "$DATADIR/pxos.img" "$DATADIR/buildfiles/isofiles" || \
+	errout "Failed to mount pxos.img"
+
+mv boot/vmlinuz-linux-lts ../isofiles/vmlinuz && \
+mv boot/initramfs-linux-lts.img ../isofiles/initramfs.img || \
+	errout "Failed to make boot files"
+
+rm -rf boot
+
+mksquashfs * "../isofiles/pxos.sfs" || errout "Failed to make sfs"
+
+cd ..
+
+# now that the compressed squashfs is made, the rootfiles are no longer needed.
+
+rm -rf rootfs
+
+cd isofiles
+
+mkdir --parents efi/boot grub
+source "$DATADIR/grub-image-cmd"
+mkgrub || errout "Failed to make grub image"
+
+cp "$DATADIR/grub.cfg" grub/grub.cfg
+
+if [ -f "$DATADIR/installed.img" ]; then
+	cp "$DATADIR/installed.img" "./pxos.img"
+fi
+
+mkisofs -o "$DATADIR/pxos.iso" -r -l -v -V PXOSISO \
+	-no-emul-boot -eltorito-platform efi -eltorito-boot "pxosboot.img" .
+
+cd "$DATADIR"
+umount "$DATADIR/buildfiles/isofiles"
+rm -rf "$DATADIR/buildfiles" "$DATADIR/pxosboot.img"
+
+echo "Done!"

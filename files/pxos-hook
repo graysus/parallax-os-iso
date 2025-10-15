@@ -1,0 +1,44 @@
+#!/usr/bin/ash
+# Part of Parallax OS. Licensed MIT.
+
+pxiso_mhnd() {
+	modprobe loop
+	modprobe overlay
+	mkdir /run/boot /run/data /run/cowspace
+
+
+	BOOTPAR=$(cat /proc/cmdline | grep -o '\bbootpar=[^ ]*')
+        BOOTPAR="${BOOTPAR:8}"
+	N=0
+	while [ $N -lt 10 ] && ! findfs "$BOOTPAR"; do
+		sleep 1
+		: $(( N++ ))
+	done
+	if [ $N -eq 10 ]; then
+		echo "Boot partition not found! Exiting..."
+		return 1
+	fi
+
+	mount -o ro "$BOOTPAR" /run/boot
+	mount -t squashfs "/run/boot/pxos.sfs" /new_root
+
+	mount -o bind /new_root/data /run/data
+	mount -t tmpfs tmpfs /run/cowspace
+
+	mkdir /run/cowspace/work /run/cowspace/upper
+
+	mount -t overlay pxiso-overlay /new_root/data -o rw,lowerdir=/run/data,upperdir=/run/cowspace/upper,workdir=/run/cowspace/work
+	
+	mount -o bind /new_root/data/var /new_root/var
+	mount -o bind /new_root/data/etc /new_root/etc
+	mount -o bind /new_root/data/root /new_root/root
+	mount -o bind /new_root/data/home /new_root/home
+	mount -t tmpfs tmpfs /new_root/mnt
+	
+	mkdir /new_root/mnt/boot
+	mount -o bind /run/boot /new_root/mnt/boot
+}
+
+run_hook() {
+	mount_handler=pxiso_mhnd
+}

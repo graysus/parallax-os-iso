@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+
+errout() {
+	echo "$*" >&2
+	exit 1
+}
+
+umount_list=()
+u() {
+	umount_list=("$@" "${umount_list[@]}")
+}
+
+# assumes mounted at $MNTLOC
+
+if [ -n "$1" ]; then
+	MNTLOC="$1"
+elif [ -z "$MNTLOC" ]; then
+	errout MNTLOC envvar is not set.
+fi
+
+if [ -z "$SERVER" ]; then
+	errout SERVER envvar is not set.
+fi
+
+if [ -z "$TIMEZONE" ]; then
+	errout TIMEZONE envvar is not set.
+fi
+
+: "${BRANCH:=VERSION}"
+
+cd "$MNTLOC"
+
+if [ -f "/mnt/boot/pxos.img" ]; then
+	TARPATH="/mnt/boot/pxos.img"
+else
+	IMGNAME=$(curl -q "$SERVER/$BRANCH")
+	curl -#LfC - -o "pxos.img" "$SERVER/pxos-$IMGNAME.img" || errout "Fetching failed!"
+	curl -#LfC - -o "pxos.img.sig" "$SERVER/pxos-$IMGNAME.img.sig" || errout "Fetching signature failed!"
+	
+	# Verify signature
+	mkdir /tmp/gpg
+	chmod 0400 /tmp/gpg
+	gpg --homedir /tmp/gpg --import /etc/pxos.gpg || errout "Signature importing failed!"
+	gpg --homedir /tmp/gpg --verify pxos.img.sig || errout "Signature verification failed!"
+	TARPATH="$(realpath "pxos.img")"
+fi
+
+tar xpf "$TARPATH" --xattrs-include="*" || errout "Extraction failed!"
+
+for i in etc var root; do
+	[ ! -d "data/$i" ] && mkdir "data/$i"
+	[ ! -d "$i" ] && mkdir "$i"
+	mount --bind "data/$i" "$i" || errout "Mounting failed!"
+done
+
+for i in etc var boot; do
+	[ ! -d "$i" ] && mkdir "$i"
+	mv "$i.def/"* "$i" || errout "Moving failed!"
+	rm -rf "$i.def"
+done
+
+if [ -n "$FSTAB" ]; then
+	cat data/fstab.tmp >> etc/fstab
+	rm data/fstab.tmp
+fi
+
+if [ "$TIMEZONE" != "n" ]; then
+	ln -s ../usr/share/zoneinfo/"$TIMEZONE" ./etc/localtime
+fi
+
+for i in proc dev run tmp dev/pts dev/shm; do
+	[ ! -d "/$i" ] && continue
+	[ ! -d "$i" ] && mkdir "$i"
+	mount --bind "/$i" "$i"
+	u "$i"
+done
+
+chroot . mkinitcpio -P
+
+if [ -n "$CFG_GRUB" ]; then
+	chroot . grub-install --efi-directory=/boot
+	chroot . grub-mkconfig -o /boot/grub/grub.cfg
+fi
+
+mkdir etc/pxos-gpg
+chmod 0400 etc/pxos-gpg
+gpg --homedir etc/pxos-gpg --import /etc/pxos.gpg
+
+for i in "${umount_list[@]}"; do
+	umount "$i"
+done
+
